@@ -5,14 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/printer"
+	"go/format"
 	"go/token"
-	"io/ioutil"
 	"os"
 	"text/template"
-
-	"golang.org/x/tools/go/ast/astutil"
 )
 
 func buildStrings(input interface{}) ast.Expr {
@@ -20,7 +16,7 @@ func buildStrings(input interface{}) ast.Expr {
 	case string:
 		return &ast.BasicLit{
 			Kind:  token.STRING,
-			Value: "\"" + val + "\"",
+			Value: fmt.Sprintf(`"%s"`, val),
 		}
 	case []string:
 		ret := make([]ast.Expr, 0, len(val))
@@ -41,7 +37,7 @@ func buildStrings(input interface{}) ast.Expr {
 			Elts: ret,
 		}
 	default:
-		panic("unsported type for string expr")
+		panic("unsupported type for string expr")
 	}
 }
 
@@ -82,112 +78,92 @@ func buildKeyValueExpr(input interface{}) ast.Expr {
 			Elts: exprs,
 		}
 	default:
-		panic("unsported type for key/val expr")
+		panic("unsupported type for key/val expr")
 	}
 }
 
-func generateIAMPolicy(input, output, pkg string) {
+func generateIAMPolicy(input, output, pkg string, shouldMinify bool) {
 	tmpl, err := template.New("").Parse(filetemplate)
 	if err != nil {
 		panic(err)
 	}
 
-	var in bytes.Buffer
-	err = tmpl.Execute(&in, pkg)
-	if err != nil {
-		panic(err)
-	}
-
-	fs := token.NewFileSet()
-	file, err := parser.ParseFile(fs, "", in.String(), 0)
-	if err != nil {
-		panic(fmt.Errorf("failed to parse template %v", err))
-	}
-
-	jsFs, err := ioutil.ReadFile(input)
-	if err != nil {
-		panic(fmt.Errorf("failed to read input file %v", err))
-	}
-
 	policy := iamPolicy{}
 
-	err = json.Unmarshal([]byte(jsFs), &policy)
+	inputFile, err := os.Open(input)
 	if err != nil {
-		panic(fmt.Errorf("failed to parse policy JSON %v", err))
+		panic(fmt.Sprintf("failed to open input file %s: %v", input, err))
+	}
+
+	decoder := json.NewDecoder(inputFile)
+	err = decoder.Decode(&policy)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse input file %s: %v", input, err))
 	}
 
 	// Minifying here as a workaround for current limitations
 	// in credential requests length (2048 max bytes).
-	miniPoliicy := minify(policy)
-
-	exprs := make([]ast.Expr, 0, len(miniPoliicy.Statement))
-	for _, p := range miniPoliicy.Statement {
-		// Workaround since cloud credential operator doesn't
-		// support multiple resources in its spec.
-		for _, r := range p.Resource {
-			policyList := make([]ast.Expr, 4)
-
-			policyList[0] = &ast.KeyValueExpr{
-				Key:   ast.NewIdent(effect),
-				Value: buildStrings(p.Effect),
-			}
-			policyList[1] = &ast.KeyValueExpr{
-				Key:   ast.NewIdent(action),
-				Value: buildStrings(p.Action),
-			}
-
-			policyList[2] = &ast.KeyValueExpr{
-				Key:   ast.NewIdent(resource),
-				Value: buildStrings(r),
-			}
-
-			policyList[3] = &ast.KeyValueExpr{
-				Key:   ast.NewIdent(policycondition),
-				Value: buildKeyValueExpr(p.Condition),
-			}
-			exprs = append(exprs, &ast.CompositeLit{Elts: policyList})
-		}
+	if shouldMinify {
+		policy = minify(policy)
 	}
 
-	astutil.Apply(file, nil, func(c *astutil.Cursor) bool {
-		n := c.Node()
-		switch x := n.(type) {
-		case *ast.ReturnStmt:
-			c.Replace(&ast.ReturnStmt{
-				Return: x.Pos(),
-				Results: []ast.Expr{
-					&ast.CompositeLit{
-						Type: ast.NewIdent("IAMPolicy"),
-						Elts: []ast.Expr{
-							&ast.KeyValueExpr{
-								Key:   ast.NewIdent("Version"),
-								Value: buildStrings(miniPoliicy.Version),
-							},
-							&ast.KeyValueExpr{
-								Key: ast.NewIdent("Statement"),
-								Value: &ast.CompositeLit{
-									Type: &ast.ArrayType{
-										Elt: &ast.SelectorExpr{
-											X:   ast.NewIdent("cco"),
-											Sel: ast.NewIdent("StatementEntry"),
-										},
-									},
-									Elts: exprs,
-								},
-							},
-						},
-					},
-				},
-			})
+	var policyOutput bytes.Buffer
+
+	fmt.Fprintf(&policyOutput, "Version: %q,\n", policy.Version)
+	fmt.Fprintf(&policyOutput, "\t\tStatement: []cco.StatementEntry{\n")
+	for _, p := range policy.Statement {
+		for _, r := range p.Resource {
+			fmt.Fprintf(&policyOutput, "\t\t\t{\n")
+			fmt.Fprintf(&policyOutput, "\t\t\t\tEffect: %q,\n", p.Effect)
+			if p.Condition != nil {
+				fmt.Fprintf(&policyOutput, "\t\t\t\tCondition:{\n")
+				for conditionKey, conditionValues := range *p.Condition {
+					fmt.Fprintf(&policyOutput, "\t\t\t\t\t%q:{\n", conditionKey)
+					for k, v := range conditionValues {
+						fmt.Fprintf(&policyOutput, "\t\t\t\t\t\t%q:%q,\n", k, v)
+					}
+					fmt.Fprintf(&policyOutput, "\t\t\t\t\t},\n")
+				}
+				fmt.Fprintf(&policyOutput, "\t\t\t\t},\n")
+			}
+			fmt.Fprintf(&policyOutput, "\t\t\t\tAction: []string{\n")
+			for _, a := range p.Action {
+				fmt.Fprintf(&policyOutput, "\t\t\t\t\t%q,\n", a)
+			}
+			fmt.Fprintf(&policyOutput, "\t\t\t\t},\n")
+
+			fmt.Fprintf(&policyOutput, "\t\t\t\tResource: %q,\n", r)
+
+			fmt.Fprintf(&policyOutput, "\t\t\t},\n")
 		}
+	}
+	fmt.Fprintf(&policyOutput, "\t\t},")
 
-		return true
-	})
+	var in bytes.Buffer
+	tmplVar := struct {
+		Package string
+		Policy  string
+	}{
+		Package: pkg,
+		Policy:  policyOutput.String(),
+	}
 
-	opFs, err := os.Create(output)
+	err = tmpl.Execute(&in, tmplVar)
 	if err != nil {
 		panic(err)
 	}
 
-	printer.Fprint(opFs, fs, file)
+	formatted, err := format.Source(in.Bytes())
+	if err != nil {
+		panic(err)
+	}
+
+	outputF, err := os.Create(output)
+	if err != nil {
+		panic(err)
+	}
+	_, err = outputF.Write(formatted)
+	if err != nil {
+		panic(err)
+	}
 }

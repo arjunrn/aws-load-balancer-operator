@@ -6,7 +6,7 @@ const (
 	effect          = "Effect"
 	action          = "Action"
 	filetemplate    = `
-package {{.}}
+package {{ .Package }}
 
 import cco "github.com/openshift/cloud-credential-operator/pkg/apis/cloudcredential/v1"
 
@@ -16,7 +16,9 @@ type IAMPolicy struct {
 }
 
 func GetIAMPolicy() IAMPolicy {
-    return IAMPolicy{}
+    return IAMPolicy{
+		{{ .Policy }}
+	}
 }
 `
 )

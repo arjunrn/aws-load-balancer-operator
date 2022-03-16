@@ -15,6 +15,9 @@ var (
 
 	// pkg specifies the package with which the code is generated.
 	pkg string
+
+	// shouldMinify specifies if the policy should be minified.
+	shouldMinify bool
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -25,7 +28,7 @@ var rootCmd = &cobra.Command{
 	CLI produces a '.go' file that is consumed by the aws load balancer operator.
 	`,
 	Run: func(cmd *cobra.Command, args []string) {
-		generateIAMPolicy(inputFile, outputFile, pkg)
+		generateIAMPolicy(inputFile, outputFile, pkg, shouldMinify)
 	},
 }
 
@@ -48,5 +51,8 @@ func init() {
 	_ = rootCmd.MarkPersistentFlagRequired("output-file")
 
 	rootCmd.PersistentFlags().StringVarP(&pkg, "package", "p", "main", "Used to specify output Go file path.")
+	_ = rootCmd.MarkPersistentFlagRequired("package")
+
+	rootCmd.PersistentFlags().BoolVarP(&shouldMinify, "minify", "m", false, "Flag to minify the policy")
 	_ = rootCmd.MarkPersistentFlagRequired("package")
 }
